@@ -1,7 +1,7 @@
-"""Simple data exploration for the CSC311 project.
+"""Data exploration for the CSC311 project (train split only).
 
 Run: python split.py first (makes split.csv), then python explore.py
-Prints counts/distributions to the terminal and saves a few plots to figs/.
+Prints the numbers used in the report and saves the plots to figs/.
 """
 import os
 import re
@@ -9,7 +9,6 @@ import re
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from sklearn.feature_extraction.text import TfidfVectorizer
 
 DATA_FILE = "csc311_project_training_202609.csv"
 
@@ -23,18 +22,23 @@ LIKERT_ORDER = ["Strongly disagree", "Disagree", "Neutral", "Agree",
 MULTI = ["where", "seasons", "music"]
 TEXT = ["food", "colour", "song", "feeling"]
 
+# Text answers that mean "no answer" (these are the ones in the train data)
+PLACEHOLDERS = {"", "none", "no", "idk", "nil", "n/a", "-", "no idea"}
 
-def load_data():
+# Price answers with no number that mean "would not pay" (-> 0)
+ZERO_WORDS = r"free|zero|none|nothing|not|unwilling|no willing|don.?t|wouldn.?t"
+
+
+def load_train():
     df = pd.read_csv(DATA_FILE)
     df.columns = SHORT_NAMES
-    # Treat blank text answers as missing
-    for col in TEXT + MULTI + LIKERT:
+    for col in MULTI + LIKERT:
         df[col] = df[col].str.strip().replace("", np.nan)
-    return df
+    for col in TEXT:
+        df[col] = df[col].str.strip()
+        df.loc[df[col].str.lower().isin(PLACEHOLDERS), col] = np.nan
 
-
-def load_train(df):
-    """Keep only the train rows, using the split saved by split.py."""
+    # Keep only the train rows, using the split saved by split.py
     split = pd.read_csv("split.csv")
     df = df.merge(split, on="id")
     return df[df["split"] == "train"].copy()
@@ -45,55 +49,67 @@ def parse_price(value):
     if pd.isna(value):
         return np.nan
     text = str(value).lower().replace(",", "")
+    text = re.sub(r"(?<=\d) (?=\d{3}\b)", "", text)  # "10 000" -> "10000"
     numbers = re.findall(r"\d+\.?\d*", text)
     if numbers:
         return np.mean([float(n) for n in numbers[:2]])
-    if any(w in text for w in ["free", "none", "nothing", "zero", "not"]):
+    if re.search(ZERO_WORDS, text):
         return 0.0
     return np.nan
 
 
 def missing_values(train):
-    print("\n=== Missing values (train) ===")
+    print("\nMissing values:")
     missing = pd.DataFrame({
         "count": train.isna().sum(),
         "percent": (train.isna().mean() * 100).round(1),
     })
-    print(missing.to_string())
+    print(missing.drop(["id", "label", "split"]).to_string())
+
+    print("\nSong missing % by sport:")
+    print(train["song"].isna().groupby(train["label"]).mean().mul(100).round(1)
+          .to_string())
 
 
-def distributions(train):
-    print("\n=== Label counts ===")
-    print(train["label"].value_counts().to_string())
-
-    print("\n=== Ease (0-10) ===")
-    print(train["ease"].describe().round(2).to_string())
-    print("\nMean ease by sport:")
-    print(train.groupby("label")["ease"].mean().round(2).to_string())
+def numeric_and_likert(train):
+    print(f"\nEase: mean {train['ease'].mean():.2f}, median {train['ease'].median()}")
 
     for col in LIKERT:
-        print(f"\n=== {col} ===")
+        print(f"\n{col}:")
         print(train[col].value_counts().reindex(LIKERT_ORDER).to_string())
+        agree = train[col].isin(["Agree", "Strongly agree"]).sum()
+        print(f"Agree or strongly agree: {agree / train[col].notna().sum() * 100:.0f}%")
 
-    for col in MULTI:
-        print(f"\n=== {col} (each option, % of rows by sport) ===")
-        options = train[col].str.get_dummies(sep=",")
-        options.columns = options.columns.str.strip()
-        pct = (options.groupby(train["label"]).mean() * 100).round(1)
-        print(pct.T.to_string())
+    print("\nCorrelation of ease and Likert features:")
+    likert = train[LIKERT].apply(lambda s: s.map(
+        {a: i + 1 for i, a in enumerate(LIKERT_ORDER)}))
+    print(pd.concat([train["ease"], likert], axis=1).corr().round(2).to_string())
 
-    print("\n=== colour ===")
-    colour = train["colour"].str.lower()
-    print("Distinct raw values:", train["colour"].nunique(),
-          "| after lowercase:", colour.nunique())
-    print(colour.value_counts().head(10).to_string())
+    print("\nSeasons, % of rows selecting each option by sport:")
+    seasons = train["seasons"].str.get_dummies(sep=",")
+    print((seasons.groupby(train["label"]).mean() * 100).round(1).T.to_string())
 
-    print("\n=== price ===")
+
+def colour(train):
+    lower = train["colour"].str.lower()
+    clean = lower.str.replace(r"[^\w\s]", "", regex=True).str.strip().replace("", np.nan)
+    print(f"\nColour: {train['colour'].nunique()} distinct raw, "
+          f"{lower.nunique()} after lowercasing, "
+          f"{clean.nunique()} after removing punctuation")
+    top7 = clean.value_counts().head(7)
+    print(top7.to_string())
+    print(f"Top 7 cover {top7.sum() / clean.notna().sum() * 100:.1f}% of answers")
+
+
+def price(train):
     price = train["price"].apply(parse_price)
-    print("Could not parse:", price.isna().sum(), "rows")
-    print(price.describe().round(1).to_string())
-    print("\nMedian price by sport:")
-    print(price.groupby(train["label"]).median().to_string())
+    print(f"\nPrice: {train['price'].isna().sum()} blank, "
+          f"{price.isna().sum()} with no usable number (incl. blanks)")
+    print(f"Valid: {price.notna().sum()}, median {price.median()}, "
+          f"mean {price.mean():.0f}, 75th percentile {price.quantile(0.75)}, "
+          f"max {price.max()}")
+    print(f"Exactly $0: {(price == 0).sum() / price.notna().sum() * 100:.1f}%")
+    print(f"Clip value (99th percentile): {price.quantile(0.99):.0f}")
     return price
 
 
@@ -118,15 +134,16 @@ def plots(train, price):
     axes[1, 1].set_title("Price (raw)")
     axes[1, 1].set_xlabel("$")
 
-    axes[1, 2].hist(np.log1p(price.dropna()), bins=30, edgecolor="black")
-    axes[1, 2].set_title("Price (log1p)")
+    clip = price.quantile(0.99)
+    axes[1, 2].hist(np.log1p(price.dropna().clip(upper=clip)), bins=30,
+                    edgecolor="black")
+    axes[1, 2].set_title("Price (clipped at 99th percentile, log1p)")
     axes[1, 2].set_xlabel("log(1 + $)")
 
     plt.tight_layout()
     plt.savefig("figs/distributions.png", dpi=150)
     plt.close()
 
-    # Mean ease by sport
     train.groupby("label")["ease"].mean().plot(kind="bar")
     plt.title("Mean ease by sport")
     plt.ylabel("Mean ease")
@@ -137,63 +154,12 @@ def plots(train, price):
     print("\nSaved plots to figs/")
 
 
-def build_features(train, price_clean):
-    """Encode the train rows into one numeric matrix (only to count features)."""
-    parts = [train[["ease"]]]
-
-    # Likert -> 1 to 5
-    likert = pd.DataFrame({f"{c}_n": train[c].map(
-        {a: i + 1 for i, a in enumerate(LIKERT_ORDER)}) for c in LIKERT})
-    parts.append(likert)
-
-    # Multi-select -> one column per option
-    for col in MULTI:
-        parts.append(train[col].str.get_dummies(sep=",").add_prefix(col + "_"))
-
-    # Colour -> top 7 colours plus "other"
-    colour = train["colour"].str.lower().str.strip()
-    top7 = colour.value_counts().index[:7]
-    parts.append(pd.get_dummies(colour.where(colour.isin(top7), "other"),
-                                prefix="colour"))
-
-    parts.append(train["song"].isna().astype(int).rename("song_missing"))
-
-    # Price -> clipped at the train 99th percentile, then log1p
-    clip = price_clean.quantile(0.99)
-    parts.append(np.log1p(price_clean.clip(upper=clip)).rename("price"))
-
-    # Free text -> TF-IDF, fit on train only
-    for col in ["food", "song", "feeling"]:
-        tfidf = TfidfVectorizer(min_df=2)
-        words = tfidf.fit_transform(train[col].fillna(""))
-        print(f"TF-IDF vocab size for {col}: {len(tfidf.vocabulary_)}")
-        parts.append(pd.DataFrame(words.toarray(), index=train.index)
-                     .add_prefix(col + "_"))
-
-    return pd.concat(parts, axis=1), likert
-
-
-def report_numbers(train, price_clean):
-    """Key numbers for the report."""
-    print("\n=== Key numbers for the report ===")
-    X_train, likert = build_features(train, price_clean)
-    train = pd.concat([train, likert], axis=1)
-
-    print("\nSong missing % by sport:")
-    print(train.groupby("label")["song"].apply(lambda s: s.isna().mean() * 100).round(1))
-    print("\nPrice clip value (train 99th percentile):", round(price_clean.quantile(0.99), 1))
-    print("\nFinal feature count:", X_train.shape[1])
-    print("\nCorrelation of ease and Likert features:")
-    print(train[["ease", "strategy_n", "injury_n", "individual_n"]].corr().round(2))
-
-
 def main():
-    df = load_data()
-    train = load_train(df)  # everything below uses the train split only
+    train = load_train()
     missing_values(train)
-    price = distributions(train)
-    plots(train, price)
-    report_numbers(train, price)
+    numeric_and_likert(train)
+    colour(train)
+    plots(train, price(train))
 
 
 if __name__ == "__main__":
